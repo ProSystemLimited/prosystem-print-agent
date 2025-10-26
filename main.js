@@ -2,8 +2,65 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } = require('electr
 const AutoLaunch = require('auto-launch');
 const path = require('path');
 const { startApi, broadcastPrinterStatus, formatPrinterList } = require('./printer-api');
+const { exec } = require('child_process');
 
 let autoUpdater;
+
+// Force kill old instance if graceful shutdown fails (for old versions without /shutdown endpoint)
+function forceKillOldInstance() {
+  if (process.platform !== 'win32') {
+    console.log('Force kill only supported on Windows. Quitting.');
+    app.quit();
+    return;
+  }
+
+  console.log('Finding and terminating processes on ports 21321 and 21322...');
+
+  // Kill process on port 21321 (HTTP API)
+  exec('netstat -ano | findstr ":21321 "', (_error, stdout) => {
+    if (stdout) {
+      const lines = stdout.trim().split('\n');
+      const pids = new Set();
+
+      lines.forEach(line => {
+        const portPattern = /:21321\s/;
+        if (portPattern.test(line)) {
+          const parts = line.trim().split(/\s+/);
+          const pid = parts[parts.length - 1];
+          if (pid && !isNaN(pid) && pid !== '0') {
+            pids.add(pid);
+          }
+        }
+      });
+
+      if (pids.size > 0) {
+        console.log(`Killing processes: ${Array.from(pids).join(', ')}`);
+        pids.forEach(pid => {
+          exec(`taskkill /F /PID ${pid}`, (err) => {
+            if (err) {
+              console.error(`Failed to kill PID ${pid}:`, err.message);
+            } else {
+              console.log(`Successfully killed PID ${pid}`);
+            }
+          });
+        });
+
+        // Wait for processes to be killed, then relaunch
+        setTimeout(() => {
+          console.log('Old instance terminated. Relaunching new instance...');
+          app.relaunch();
+          app.quit();
+        }, 2000);
+      } else {
+        console.log('No processes found on port 21321. Quitting.');
+        app.quit();
+      }
+    } else {
+      console.log('Could not find processes. Quitting.');
+      app.quit();
+    }
+  });
+}
 
 // **CRITICAL**: This prevents multiple instances of the agent from running.
 // If we can't get the lock, it means another instance is running.
@@ -34,15 +91,20 @@ if (!gotTheLock) {
 
   req.on('error', (err) => {
     console.log('Could not reach old instance:', err.message);
-    console.log('Old instance may be stuck. This instance will quit.');
-    // Could not reach the old instance - just quit
-    app.quit();
+    console.log('Old instance may not have /shutdown endpoint (older version).');
+    console.log('Attempting to force kill old instance via port recovery...');
+
+    // Force kill the old instance by terminating processes on our ports
+    forceKillOldInstance();
   });
 
   req.on('timeout', () => {
-    console.log('Timeout reaching old instance. This instance will quit.');
+    console.log('Timeout reaching old instance.');
+    console.log('Attempting to force kill old instance via port recovery...');
     req.destroy();
-    app.quit();
+
+    // Force kill the old instance by terminating processes on our ports
+    forceKillOldInstance();
   });
 
   req.end();
