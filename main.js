@@ -56,7 +56,6 @@ if (!gotTheLock) {
 let shellWindow;
 let tray = null;
 let statusWindow = null;
-let updateMenuItem = null; // Track update menu item
 let appStartTime = Date.now(); // Track uptime
 
 // Keep global reference to prevent GC
@@ -68,8 +67,8 @@ let trayCreationAttempts = 0;
 const setupAutoUpdater = () => {
   autoUpdater = require('electron-updater').autoUpdater;
 
-  // Configure auto-updater
-  autoUpdater.autoDownload = false; // Don't auto-download, ask user first
+  // Configure auto-updater for fully automatic updates
+  autoUpdater.autoDownload = true; // Automatically download updates in background
   autoUpdater.autoInstallOnAppQuit = true; // Install when app quits
 
   // Auto-updater event handlers
@@ -79,36 +78,21 @@ const setupAutoUpdater = () => {
 
   autoUpdater.on('update-available', (info) => {
     console.log('Update available:', info.version);
+    console.log('Downloading update automatically in background...');
 
-    // Add "Update Available" to tray menu
-    if (tray && updateMenuItem === null) {
+    // Update tray menu to show download is happening
+    if (tray) {
       const currentMenu = tray.getContextMenu();
       const items = currentMenu ? currentMenu.items : [];
 
-      updateMenuItem = {
-        label: `Update to v${info.version}`,
-        click: () => {
-          console.log('User clicked update - downloading...');
-          autoUpdater.downloadUpdate();
-
-          // Update menu to show downloading
-          const newMenu = Menu.buildFromTemplate([
-            ...items.slice(0, -1), // Keep existing items except last separator
-            { label: 'Downloading update...', enabled: false },
-            { type: 'separator' },
-            ...items.slice(-1) // Keep Restart option
-          ]);
-          tray.setContextMenu(newMenu);
-        }
-      };
-
       const newMenu = Menu.buildFromTemplate([
         ...items.slice(0, -1), // Keep existing items
-        updateMenuItem,
+        { label: `Downloading v${info.version}...`, enabled: false },
         { type: 'separator' },
         ...items.slice(-1) // Keep Restart option
       ]);
       tray.setContextMenu(newMenu);
+      tray.setToolTip(`Downloading update v${info.version}...`);
     }
   });
 
@@ -123,8 +107,9 @@ const setupAutoUpdater = () => {
 
   autoUpdater.on('update-downloaded', (info) => {
     console.log('Update downloaded:', info.version);
+    console.log('Update will be installed on next app restart');
 
-    // Update tray menu to show "Restart to Update"
+    // Update tray menu to show update is ready
     if (tray) {
       const currentMenu = tray.getContextMenu();
       const items = currentMenu ? currentMenu.items : [];
@@ -132,7 +117,7 @@ const setupAutoUpdater = () => {
       const newMenu = Menu.buildFromTemplate([
         ...items.slice(0, -2), // Remove download progress item
         {
-          label: `Restart to install v${info.version}`,
+          label: `Update v${info.version} ready - Restart now`,
           click: () => {
             console.log('User clicked restart - installing update...');
             autoUpdater.quitAndInstall(false, true); // Don't force close, restart immediately
@@ -142,13 +127,16 @@ const setupAutoUpdater = () => {
         { label: 'Restart', click: () => { app.relaunch(); app.quit(); } }
       ]);
       tray.setContextMenu(newMenu);
-      tray.setToolTip('Update ready to install');
+      tray.setToolTip(`Update v${info.version} ready - will install on restart`);
     }
   });
 
   autoUpdater.on('error', (err) => {
     console.error('Auto-updater error:', err);
-    updateMenuItem = null; // Reset on error
+    // Reset tray tooltip on error
+    if (tray && !tray.isDestroyed()) {
+      tray.setToolTip('ProSystem Print Agent');
+    }
   });
 };
 
