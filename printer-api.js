@@ -760,6 +760,31 @@ async function startApi(webContents) {
       jobKey = `${printer.name}-${Date.now()}`;
       console.log(`Starting print job: ${jobKey}`);
 
+      // Detect if this is a PDF/virtual printer (shows save dialog)
+      const pdfPrinterNames = [
+        'Microsoft Print to PDF',
+        'Microsoft XPS Document Writer',
+        'Adobe PDF',
+        'CutePDF Writer',
+        'PDFCreator',
+        'Foxit Reader PDF Printer',
+        'Bullzip PDF Printer',
+        'OneNote',
+        'Fax'
+      ];
+      const isPdfPrinter = pdfPrinterNames.some(name =>
+        printer.name.toLowerCase().includes(name.toLowerCase())
+      );
+
+      // PDF printers need longer timeout (user needs to choose save location)
+      // Physical printers get 30 seconds, PDF printers get 5 minutes
+      const timeoutDuration = isPdfPrinter ? 300000 : 30000;
+      const timeoutMessage = isPdfPrinter
+        ? 'Print operation timed out after 5 minutes (PDF printer dialog)'
+        : 'Print operation timed out after 30 seconds';
+
+      console.log(`Printer type: ${isPdfPrinter ? 'PDF/Virtual' : 'Physical'}, timeout: ${timeoutDuration/1000}s`);
+
       win = new BrowserWindow({ show: false });
 
       await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
@@ -769,9 +794,9 @@ async function startApi(webContents) {
         const timeout = setTimeout(() => {
           if (!callbackCalled) {
             callbackCalled = true;
-            reject(new Error('Print operation timed out after 30 seconds'));
+            reject(new Error(timeoutMessage));
           }
-        }, 30000);
+        }, timeoutDuration);
 
         win.webContents.print(
           {
