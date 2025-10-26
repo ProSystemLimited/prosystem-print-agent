@@ -73,7 +73,11 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": false,
       "deleteAppDataOnUninstall": true,
-      "runAfterFinish": true
+      "runAfterFinish": true,
+      "allowElevation": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": false,
+      "include": "installer.nsh"
     }
   }
 }
