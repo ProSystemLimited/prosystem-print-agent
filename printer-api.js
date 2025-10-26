@@ -7,28 +7,8 @@ const { ThermalPrinter, PrinterTypes } = require('node-thermal-printer');
 const printer = require('@thesusheer/electron-printer');
 const net = require('net');
 
-// Track active print jobs to prevent duplicates
-const activePrintJobs = new Map();
-
-// Atomic lock acquisition function to prevent race conditions
-function acquirePrintLock(printerName, jobKey) {
-  // Check and set atomically
-  if (activePrintJobs.has(printerName)) {
-    return false; // Lock already held
-  }
-  activePrintJobs.set(printerName, jobKey);
-  return true; // Successfully acquired lock
-}
-
-// Safe lock release function
-function releasePrintLock(printerName, jobKey) {
-  // Only release if we own the lock
-  if (activePrintJobs.get(printerName) === jobKey) {
-    activePrintJobs.delete(printerName);
-    return true;
-  }
-  return false;
-}
+// Locks removed - allow concurrent print jobs
+// The printer driver and OS will handle queuing
 
 /**
  * Formats a date object or a valid date string into a DD/MM/YYYY string.
@@ -776,17 +756,9 @@ async function startApi(webContents) {
         });
       }
 
-      // Create a unique key for this print job
+      // Create a unique key for this print job (for logging purposes)
       jobKey = `${printer.name}-${Date.now()}`;
-
-      // Atomically acquire lock for this printer
-      if (!acquirePrintLock(printer.name, jobKey)) {
-        console.log(`Print job already in progress for printer: ${printer.name}`);
-        return res.status(409).json({
-          error: 'Print job already in progress',
-          message: 'Please wait for the current print job to complete'
-        });
-      }
+      console.log(`Starting print job: ${jobKey}`);
 
       win = new BrowserWindow({ show: false });
 
@@ -859,9 +831,8 @@ async function startApi(webContents) {
         }
       }
 
-      // Always release the lock using the safe function
-      if (jobKey && printer?.name) {
-        releasePrintLock(printer.name, jobKey);
+      if (jobKey) {
+        console.log(`Finished print job: ${jobKey}`);
       }
     }
   });
@@ -892,17 +863,8 @@ async function startApi(webContents) {
         });
       }
 
-      // Create a unique key for this print job
+      // Create a unique key for this print job (for logging purposes)
       jobKey = `${printerInfo.name}-${Date.now()}`;
-
-      // Atomically acquire lock for this printer
-      if (!acquirePrintLock(printerInfo.name, jobKey)) {
-        console.log(`Thermal print job already in progress for printer: ${printerInfo.name}`);
-        return res.status(409).json({
-          error: 'Print job already in progress',
-          message: 'Please wait for the current print job to complete'
-        });
-      }
 
       // Calculate optimal character width
       const charWidth = getOptimalCharacterWidth(widthMM);
@@ -1015,9 +977,8 @@ async function startApi(webContents) {
         details: 'Please check if the printer is available, connected, and supports thermal printing'
       });
     } finally {
-      // Always release the lock using the safe function
-      if (jobKey && printerInfo?.name) {
-        releasePrintLock(printerInfo.name, jobKey);
+      if (jobKey) {
+        console.log(`Finished thermal print job: ${jobKey}`);
       }
     }
   });
