@@ -12,6 +12,7 @@
     "start": "cross-env NODE_ENV=development electron .",
     "start:prod": "cross-env NODE_ENV=production electron .",
     "dist": "electron-builder",
+    "release": "electron-builder --publish always",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
@@ -56,7 +57,7 @@
     },
     "win": {
       "target": "nsis",
-      "icon": "build/android-chrome-384x384.ico",
+      "icon": "build/web-app-manifest-512x512.ico",
       "publisherName": "ProSystem"
     },
     "mac": {

@@ -10,6 +10,26 @@ const net = require('net');
 // Track active print jobs to prevent duplicates
 const activePrintJobs = new Map();
 
+// Atomic lock acquisition function to prevent race conditions
+function acquirePrintLock(printerName, jobKey) {
+  // Check and set atomically
+  if (activePrintJobs.has(printerName)) {
+    return false; // Lock already held
+  }
+  activePrintJobs.set(printerName, jobKey);
+  return true; // Successfully acquired lock
+}
+
+// Safe lock release function
+function releasePrintLock(printerName, jobKey) {
+  // Only release if we own the lock
+  if (activePrintJobs.get(printerName) === jobKey) {
+    activePrintJobs.delete(printerName);
+    return true;
+  }
+  return false;
+}
+
 /**
  * Formats a date object or a valid date string into a DD/MM/YYYY string.
  *
@@ -129,13 +149,19 @@ function buildThermalReceipt(printer, data, totals) {
   // Get character width from printer config
   const charWidth = printer.config.width;
 
+  // Make ALL text bold throughout the receipt
+  printer.bold(true);
+
   // Header - Organization
   printer.alignCenter();
   printer.setTextQuadArea(); // Make it even bigger - 2x width and 2x height
-  printer.bold(true);
+  printer.bold(true); // Ensure bold is enabled for organization name
+
   printer.println(data.displayName || 'Organization');
-  printer.bold(false);
+  printer.invert(false); // Reset invert
   printer.setTextNormal();
+  printer.bold(true); // Re-enable bold after setTextNormal resets it
+  printer.setTextSize(0, 0); // Set custom size (normal width, double height) for all receipt content
 
   // BIN & VAT
   if (data.location?.binNumber || data.binNumber) {
@@ -188,9 +214,7 @@ function buildThermalReceipt(printer, data, totals) {
   // Customer
   if (data.customer) {
     printer.drawLine();
-    printer.bold(true);
     printer.println('CUSTOMER');
-    printer.bold(false);
 
     if (data.customer.name) printer.println(data.customer.name);
     if (data.customer.phone) printer.println(`Phone: ${data.customer.phone}`);
@@ -214,14 +238,12 @@ function buildThermalReceipt(printer, data, totals) {
 
   // Items Header - Full width table
   printer.drawLine();
-  printer.bold(true);
   printer.tableCustom([
     { text: "Sl", align: "LEFT", width: 0.08 },
     { text: "Item", align: "LEFT", width: 0.54 },
     { text: "Qty", align: "CENTER", width: 0.15 },
     { text: "Price", align: "RIGHT", width: 0.23 }
   ]);
-  printer.bold(false);
   printer.drawLine();
 
   // Items - Full width for each item
@@ -273,13 +295,11 @@ function buildThermalReceipt(printer, data, totals) {
   });
 
   // Grand Total - Manual spacing
-  printer.bold(true);
   printer.println(createTwoColumnLine(
     "TOTAL",
     `${CommaFormatted(CurrencyFormatted(totals.grandTotal))}`,
     charWidth
   ));
-  printer.bold(false);
 
   // Payments - Manual spacing for full width
   if (totals.payments.length > 0) {
@@ -300,23 +320,19 @@ function buildThermalReceipt(printer, data, totals) {
     printer.drawLine();
 
     if (totals.totalPaid > 0) {
-      printer.bold(true);
       printer.println(createTwoColumnLine(
         "PAID",
         `${CommaFormatted(CurrencyFormatted(totals.totalPaid))}`,
         charWidth
       ));
-      printer.bold(false);
     }
 
     if (totals.balanceDue > 0) {
-      printer.bold(true);
       printer.println(createTwoColumnLine(
         "DUE",
         `${CommaFormatted(CurrencyFormatted(totals.balanceDue))}`,
         charWidth
       ));
-      printer.bold(false);
     }
   }
 
@@ -325,9 +341,7 @@ function buildThermalReceipt(printer, data, totals) {
   if (visibleNotes.length > 0) {
     printer.newLine();
     printer.drawLine();
-    printer.bold(true);
     printer.println('Notes:');
-    printer.bold(false);
 
     visibleNotes.forEach(note => {
       printer.println(`- ${note.text}`);
@@ -341,9 +355,13 @@ function buildThermalReceipt(printer, data, totals) {
   // Footer
   printer.newLine();
   printer.alignCenter();
+  printer.setTextNormal(); // Reset to normal size before footer
   printer.setTypeFontB();  // Switch to smaller font
   printer.println('Powered by ProSystem');
   printer.setTypeFontA();  // Reset to normal font
+
+  // Reset bold before cutting paper
+  printer.bold(false);
 
   // Cut paper
   printer.cut();
@@ -461,14 +479,238 @@ function wrapText(text, maxWidth) {
 
 let wss;
 let globalWebContents;
+let httpServer;
+let apiStartupAttempts = 0;
+const MAX_STARTUP_ATTEMPTS = 3;
 
-function startApi(webContents) {
+/**
+ * Check if a port is available
+ * @param {number} port - Port number to check
+ * @returns {Promise<boolean>} - True if port is available
+ */
+async function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const testServer = net.createServer();
+
+    testServer.once('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        resolve(false);
+      } else {
+        resolve(true);
+      }
+    });
+
+    testServer.once('listening', () => {
+      testServer.close();
+      resolve(true);
+    });
+
+    testServer.listen(port, '127.0.0.1');
+  });
+}
+
+/**
+ * Attempt to gracefully terminate old process using the port
+ * @param {number} port - Port number that's in use
+ */
+async function attemptGracefulShutdown(port) {
+  return new Promise((resolve) => {
+    try {
+      // Try to send a shutdown signal to the existing instance via HTTP
+      const http = require('http');
+      const options = {
+        hostname: '127.0.0.1',
+        port: port,
+        path: '/shutdown',
+        method: 'POST',
+        timeout: 2000
+      };
+
+      const req = http.request(options, (res) => {
+        console.log(`Graceful shutdown signal sent to old instance on port ${port}`);
+        // Wait a bit for the old instance to shut down
+        setTimeout(() => resolve(true), 2000);
+      });
+
+      req.on('error', () => {
+        // If we can't reach the old instance, it might be stuck
+        resolve(false);
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        resolve(false);
+      });
+
+      req.end();
+    } catch (error) {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Kill processes using specific ports (Windows-specific)
+ * @param {number} port - Port number to free up
+ */
+async function killProcessOnPort(port) {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') {
+      resolve(false);
+      return;
+    }
+
+    const { exec } = require('child_process');
+
+    // Find the PID using the port - use word boundary to match exact port
+    exec(`netstat -ano | findstr ":${port} "`, (error, stdout) => {
+      if (error || !stdout) {
+        resolve(false);
+        return;
+      }
+
+      // Extract PID from netstat output
+      const lines = stdout.trim().split('\n');
+      const pids = new Set();
+
+      lines.forEach(line => {
+        // More precise check: ensure we're matching the exact port number
+        // Look for patterns like ":21321 " (with space after) to avoid matching :213210
+        const portPattern = new RegExp(`:${port}\\s`);
+        if (portPattern.test(line)) {
+          const parts = line.trim().split(/\s+/);
+          const pid = parts[parts.length - 1];
+          if (pid && !isNaN(pid) && pid !== '0') {
+            pids.add(pid);
+          }
+        }
+      });
+
+      if (pids.size === 0) {
+        resolve(false);
+        return;
+      }
+
+      // Kill all PIDs found
+      let killCount = 0;
+      pids.forEach(pid => {
+        exec(`taskkill /F /PID ${pid}`, (killError) => {
+          killCount++;
+          if (killCount === pids.size) {
+            console.log(`Forcefully terminated ${pids.size} process(es) on port ${port}`);
+            // Wait a bit for the OS to release the port
+            setTimeout(() => resolve(true), 1500);
+          }
+        });
+      });
+    });
+  });
+}
+
+/**
+ * Ensure ports are available, attempting recovery if needed
+ * @param {number[]} ports - Array of ports to check and free
+ * @returns {Promise<boolean>} - True if all ports are now available
+ */
+async function ensurePortsAvailable(ports) {
+  for (const port of ports) {
+    const available = await isPortAvailable(port);
+
+    if (!available) {
+      console.log(`Port ${port} is in use. Attempting graceful shutdown...`);
+
+      // Step 1: Try graceful shutdown
+      const graceful = await attemptGracefulShutdown(port);
+
+      if (graceful) {
+        const nowAvailable = await isPortAvailable(port);
+        if (nowAvailable) {
+          console.log(`Port ${port} freed via graceful shutdown`);
+          continue;
+        }
+      }
+
+      // Step 2: Force kill the process
+      console.log(`Graceful shutdown failed. Force killing process on port ${port}...`);
+      await killProcessOnPort(port);
+
+      // Step 3: Final check
+      const finalCheck = await isPortAvailable(port);
+      if (!finalCheck) {
+        console.error(`Failed to free port ${port} after all attempts`);
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+async function startApi(webContents) {
   globalWebContents = webContents;
-  const api = express();
-  api.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
-  api.use(bodyParser.json({ limit: '1mb' }));
 
-  wss = new WebSocket.Server({ port: 21322 });
+  try {
+    // Ensure both ports are available before starting
+    console.log('Checking port availability...');
+    const portsAvailable = await ensurePortsAvailable([21321, 21322]);
+
+    if (!portsAvailable) {
+      apiStartupAttempts++;
+      if (apiStartupAttempts < MAX_STARTUP_ATTEMPTS) {
+        console.log(`Retrying API startup (attempt ${apiStartupAttempts + 1}/${MAX_STARTUP_ATTEMPTS})...`);
+        setTimeout(() => startApi(webContents), 3000);
+        return;
+      } else {
+        console.error('Failed to start API after multiple attempts. Ports remain occupied.');
+        // Send error notification to main process
+        if (globalWebContents) {
+          globalWebContents.send('api-startup-failed', {
+            error: 'Ports 21321 and 21322 are occupied and cannot be freed'
+          });
+        }
+        return;
+      }
+    }
+
+    console.log('Ports available. Starting API services...');
+
+    const api = express();
+    api.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
+    api.use(bodyParser.json({ limit: '1mb' }));
+
+    // Add graceful shutdown endpoint
+    api.post('/shutdown', (_req, res) => {
+      console.log('Received shutdown request from new instance');
+      res.sendStatus(200);
+
+      // Gracefully shut down after responding
+      setTimeout(() => {
+        console.log('Shutting down gracefully...');
+
+        // Clear heartbeat interval if it exists
+        if (typeof heartbeatInterval !== 'undefined' && heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+        }
+
+        if (wss) {
+          wss.close();
+        }
+        if (httpServer) {
+          httpServer.close(() => {
+            console.log('HTTP server closed');
+            process.exit(0);
+          });
+        } else {
+          process.exit(0);
+        }
+      }, 500);
+    });
+
+    wss = new WebSocket.Server({ port: 21322 });
+
+  // Track heartbeat interval to prevent memory leak
+  let heartbeatInterval = null;
+
   wss.on('connection', async socket => {
     console.log('🔌 WebSocket client connected.');
     socket.isAlive = true;
@@ -485,13 +727,28 @@ function startApi(webContents) {
     }
   });
 
-  setInterval(() => {
-    wss.clients.forEach(ws => {
-      if (!ws.isAlive) return ws.terminate();
-      ws.isAlive = false;
-      ws.ping();
-    });
+  // Clear any existing interval before creating new one
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+  }
+
+  heartbeatInterval = setInterval(() => {
+    if (wss && wss.clients) {
+      wss.clients.forEach(ws => {
+        if (!ws.isAlive) return ws.terminate();
+        ws.isAlive = false;
+        ws.ping();
+      });
+    }
   }, 30000);
+
+  // Clean up interval when WebSocket server closes
+  wss.on('close', () => {
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+      heartbeatInterval = null;
+    }
+  });
 
   api.get('/list-printers', async (_req, res) => {
     try {
@@ -522,17 +779,14 @@ function startApi(webContents) {
       // Create a unique key for this print job
       jobKey = `${printer.name}-${Date.now()}`;
 
-      // Check if there's already an active job for this printer
-      if (activePrintJobs.has(printer.name)) {
+      // Atomically acquire lock for this printer
+      if (!acquirePrintLock(printer.name, jobKey)) {
         console.log(`Print job already in progress for printer: ${printer.name}`);
         return res.status(409).json({
           error: 'Print job already in progress',
           message: 'Please wait for the current print job to complete'
         });
       }
-
-      // Mark this printer as busy
-      activePrintJobs.set(printer.name, jobKey);
 
       win = new BrowserWindow({ show: false });
 
@@ -583,34 +837,10 @@ function startApi(webContents) {
         );
       });
 
-      // Clean up
-      if (win && !win.isDestroyed()) {
-        win.destroy();
-      }
-
-      // Remove from active jobs
-      if (jobKey && activePrintJobs.get(printer.name) === jobKey) {
-        activePrintJobs.delete(printer.name);
-      }
-
       res.sendStatus(204);
 
     } catch (e) {
       console.error('Print API error:', e);
-
-      // Clean up window
-      if (win && !win.isDestroyed()) {
-        try {
-          win.destroy();
-        } catch (destroyError) {
-          console.error('Error destroying window:', destroyError);
-        }
-      }
-
-      // Remove from active jobs
-      if (jobKey && activePrintJobs.get(req.body.printer?.name) === jobKey) {
-        activePrintJobs.delete(req.body.printer.name);
-      }
 
       // Return a user-friendly error message
       const errorMessage = e.message || 'Unknown print error occurred';
@@ -619,6 +849,20 @@ function startApi(webContents) {
         message: errorMessage,
         details: 'Please check if the printer is available and connected'
       });
+    } finally {
+      // Always clean up resources
+      if (win && !win.isDestroyed()) {
+        try {
+          win.destroy();
+        } catch (destroyError) {
+          console.error('Error destroying window:', destroyError);
+        }
+      }
+
+      // Always release the lock using the safe function
+      if (jobKey && printer?.name) {
+        releasePrintLock(printer.name, jobKey);
+      }
     }
   });
 
@@ -634,9 +878,12 @@ function startApi(webContents) {
  */
   api.post('/print-thermal', async (req, res) => {
     let jobKey = null;
+    let printerInfo = null;
 
     try {
-      const { printer: printerInfo, data, totals, widthMM } = req.body;
+      // Extract printerInfo at a higher scope so it's accessible in finally block
+      printerInfo = req.body.printer;
+      const { data, totals, widthMM } = req.body;
 
       // Validate required fields
       if (!printerInfo || !data || !totals || !widthMM) {
@@ -648,17 +895,14 @@ function startApi(webContents) {
       // Create a unique key for this print job
       jobKey = `${printerInfo.name}-${Date.now()}`;
 
-      // Check if there's already an active job for this printer
-      if (activePrintJobs.has(printerInfo.name)) {
+      // Atomically acquire lock for this printer
+      if (!acquirePrintLock(printerInfo.name, jobKey)) {
         console.log(`Thermal print job already in progress for printer: ${printerInfo.name}`);
         return res.status(409).json({
           error: 'Print job already in progress',
           message: 'Please wait for the current print job to complete'
         });
       }
-
-      // Mark this printer as busy
-      activePrintJobs.set(printerInfo.name, jobKey);
 
       // Calculate optimal character width
       const charWidth = getOptimalCharacterWidth(widthMM);
@@ -694,30 +938,36 @@ function startApi(webContents) {
             reject(new Error('TCP connection timed out after 10 seconds'));
           }, 10000);
 
-          const socket = net.connect(8100, '127.0.0.1');
+          try {
+            const socket = net.connect(8100, '127.0.0.1');
 
-          socket.on('connect', () => {
-            clearTimeout(timeout);
-            try {
-              socket.write(buffer);
-              socket.end();
-              console.log('✔️ Thermal receipt sent to emulator successfully');
-            } catch (writeError) {
-              reject(new Error(`Failed to write to emulator: ${writeError.message}`));
-            }
-          });
+            socket.on('connect', () => {
+              clearTimeout(timeout);
+              try {
+                socket.write(buffer);
+                socket.end();
+                console.log('✔️ Thermal receipt sent to emulator successfully');
+              } catch (writeError) {
+                reject(new Error(`Failed to write to emulator: ${writeError.message}`));
+              }
+            });
 
-          socket.on('error', (err) => {
-            clearTimeout(timeout);
-            console.error('TCP connection error:', err);
-            socket.destroy();
-            reject(new Error(`Failed to connect to emulator: ${err.message}`));
-          });
+            socket.on('error', (err) => {
+              clearTimeout(timeout);
+              console.error('TCP connection error:', err);
+              socket.destroy();
+              reject(new Error(`Failed to connect to emulator: ${err.message}`));
+            });
 
-          socket.on('close', () => {
+            socket.on('close', () => {
+              clearTimeout(timeout);
+              resolve();
+            });
+          } catch (err) {
+            // Clear timeout if net.connect throws synchronously
             clearTimeout(timeout);
-            resolve();
-          });
+            reject(new Error(`Failed to create TCP connection: ${err.message}`));
+          }
         });
       } else {
         // Production: Use printer.printDirect with RAW type
@@ -752,20 +1002,10 @@ function startApi(webContents) {
         });
       }
 
-      // Remove from active jobs
-      if (jobKey && activePrintJobs.get(printerInfo.name) === jobKey) {
-        activePrintJobs.delete(printerInfo.name);
-      }
-
       return res.sendStatus(204);
 
     } catch (error) {
       console.error('Thermal print error:', error);
-
-      // Remove from active jobs
-      if (jobKey && activePrintJobs.get(req.body.printer?.name) === jobKey) {
-        activePrintJobs.delete(req.body.printer.name);
-      }
 
       // Return a user-friendly error message
       const errorMessage = error.message || 'Unknown thermal print error occurred';
@@ -774,10 +1014,46 @@ function startApi(webContents) {
         message: errorMessage,
         details: 'Please check if the printer is available, connected, and supports thermal printing'
       });
+    } finally {
+      // Always release the lock using the safe function
+      if (jobKey && printerInfo?.name) {
+        releasePrintLock(printerInfo.name, jobKey);
+      }
     }
   });
 
-  api.listen(21321, '127.0.0.1', () => console.log('▶ Print agent API at http://127.0.0.1:21321'));
+  httpServer = api.listen(21321, '127.0.0.1', () => {
+    console.log('▶ Print agent API at http://127.0.0.1:21321');
+    console.log('✓ All services started successfully');
+    apiStartupAttempts = 0; // Reset on success
+  });
+
+  httpServer.on('error', (err) => {
+    console.error('HTTP server error:', err);
+    if (err.code === 'EADDRINUSE') {
+      console.log('Port 21321 still in use despite checks. Retrying...');
+      apiStartupAttempts++;
+      if (apiStartupAttempts < MAX_STARTUP_ATTEMPTS) {
+        setTimeout(() => startApi(webContents), 3000);
+      }
+    }
+  });
+
+  } catch (error) {
+    console.error('Failed to start API:', error);
+    apiStartupAttempts++;
+    if (apiStartupAttempts < MAX_STARTUP_ATTEMPTS) {
+      console.log(`Retrying API startup (attempt ${apiStartupAttempts + 1}/${MAX_STARTUP_ATTEMPTS})...`);
+      setTimeout(() => startApi(webContents), 3000);
+    } else {
+      console.error('Failed to start API after multiple attempts.');
+      if (globalWebContents) {
+        globalWebContents.send('api-startup-failed', {
+          error: error.message || 'Unknown startup error'
+        });
+      }
+    }
+  }
 }
 
 function broadcastPrinterStatus(printerList) {

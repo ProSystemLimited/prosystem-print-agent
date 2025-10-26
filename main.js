@@ -6,8 +6,51 @@ const { startApi, broadcastPrinterStatus, formatPrinterList } = require('./print
 let autoUpdater;
 
 // **CRITICAL**: This prevents multiple instances of the agent from running.
-if (!app.requestSingleInstanceLock()) {
-  app.quit();
+// If we can't get the lock, it means another instance is running.
+// We'll attempt to signal the old instance to shut down gracefully.
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  console.log('Another instance is already running. Attempting graceful handoff...');
+
+  // Try to signal the old instance to shut down
+  const http = require('http');
+  const options = {
+    hostname: '127.0.0.1',
+    port: 21321,
+    path: '/shutdown',
+    method: 'POST',
+    timeout: 3000
+  };
+
+  const req = http.request(options, () => {
+    console.log('Shutdown signal sent to old instance. This instance will now start.');
+    // Wait for old instance to shut down, then restart this one
+    setTimeout(() => {
+      app.relaunch();
+      app.quit();
+    }, 3000);
+  });
+
+  req.on('error', (err) => {
+    console.log('Could not reach old instance:', err.message);
+    console.log('Old instance may be stuck. This instance will quit.');
+    // Could not reach the old instance - just quit
+    app.quit();
+  });
+
+  req.on('timeout', () => {
+    console.log('Timeout reaching old instance. This instance will quit.');
+    req.destroy();
+    app.quit();
+  });
+
+  req.end();
+} else {
+  // We got the lock - handle second-instance attempts
+  app.on('second-instance', () => {
+    console.log('Another instance tried to start. Ignoring (this instance is primary).');
+  });
 }
 
 let shellWindow;
@@ -116,7 +159,7 @@ const createStatusWindow = () => {
     return;
   }
 
-  const iconPath = path.join(__dirname, 'build', 'prosystem-icon.ico');
+  const iconPath = path.join(__dirname, 'build', 'web-app-manifest-512x512.ico');
 
   statusWindow = new BrowserWindow({
     width: 400,
@@ -178,7 +221,7 @@ app.whenReady().then(() => {
   // Initialize auto-updater
   setupAutoUpdater();
 
-  const appIconPath = path.join(__dirname, 'build', 'prosystem-icon.ico');
+  const appIconPath = path.join(__dirname, 'build', 'web-app-manifest-512x512.ico');
 
   shellWindow = new BrowserWindow({
     show: false,
@@ -190,11 +233,26 @@ app.whenReady().then(() => {
   });
   shellWindow.loadURL('data:text/html,<html></html>'); // A lightweight, invisible window to host the print logic
 
+  // Start API with error recovery
   startApi(shellWindow.webContents);
+
+  // Listen for API startup failures
+  shellWindow.webContents.on('ipc-message', (_event, channel, data) => {
+    if (channel === 'api-startup-failed') {
+      console.error('API startup failed:', data.error);
+      console.log('Attempting app restart to recover...');
+
+      // Restart the entire app after a delay
+      setTimeout(() => {
+        app.relaunch();
+        app.quit();
+      }, 2000);
+    }
+  });
 
   // Create tray icon with proper handling to ensure it always displays
   // Store path globally to prevent issues
-  trayIconPath = path.join(__dirname, 'build', 'prosystem-icon.ico');
+  trayIconPath = path.join(__dirname, 'build', 'web-app-manifest-512x512.ico');
 
   // Function to create or recreate the tray icon
   const createTray = () => {
@@ -291,7 +349,7 @@ app.whenReady().then(() => {
 
   // Update tray menu periodically
   setInterval(() => {
-    if (tray && !tray.isDestroyed()) {
+    if (tray && !tray.isDestroyed() && shellWindow && !shellWindow.isDestroyed()) {
       updateTrayMenu(tray, shellWindow.webContents);
     }
   }, 10000); // Check for printer changes every 10s
@@ -306,6 +364,17 @@ app.whenReady().then(() => {
   // Set up IPC handlers for status window
   ipcMain.on('request-status', async (event) => {
     try {
+      // Check if shellWindow exists and is not destroyed
+      if (!shellWindow || shellWindow.isDestroyed()) {
+        event.reply('status-update', {
+          apiStatus: 'offline',
+          printers: [],
+          uptime: Date.now() - appStartTime,
+          error: 'Shell window not available'
+        });
+        return;
+      }
+
       const rawPrinters = await shellWindow.webContents.getPrintersAsync();
       const printers = formatPrinterList(rawPrinters);
       const uptime = Date.now() - appStartTime;
@@ -319,7 +388,8 @@ app.whenReady().then(() => {
       event.reply('status-update', {
         apiStatus: 'offline',
         printers: [],
-        uptime: Date.now() - appStartTime
+        uptime: Date.now() - appStartTime,
+        error: error.message
       });
     }
   });

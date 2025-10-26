@@ -2,6 +2,7 @@
 node_modules/
 
 # Build output
+backup_dist/
 dist/
 out/
 build/config.gypi
