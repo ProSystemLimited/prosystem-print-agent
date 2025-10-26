@@ -655,7 +655,17 @@ async function startApi(webContents) {
     console.log('Ports available. Starting API services...');
 
     const api = express();
-    api.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
+
+    // Enable CORS for all origins with full OPTIONS support
+    api.use(cors({
+      origin: '*',
+      methods: ['GET', 'POST', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization'],
+      credentials: false,
+      preflightContinue: false,
+      optionsSuccessStatus: 204
+    }));
+
     api.use(bodyParser.json({ limit: '1mb' }));
 
     // Add graceful shutdown endpoint
