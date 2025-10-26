@@ -107,28 +107,19 @@ const setupAutoUpdater = () => {
 
   autoUpdater.on('update-downloaded', (info) => {
     console.log('Update downloaded:', info.version);
-    console.log('Update will be installed on next app restart');
+    console.log('Installing update and restarting in 5 seconds...');
 
-    // Update tray menu to show update is ready
-    if (tray) {
-      const currentMenu = tray.getContextMenu();
-      const items = currentMenu ? currentMenu.items : [];
-
-      const newMenu = Menu.buildFromTemplate([
-        ...items.slice(0, -2), // Remove download progress item
-        {
-          label: `Update v${info.version} ready - Restart now`,
-          click: () => {
-            console.log('User clicked restart - installing update...');
-            autoUpdater.quitAndInstall(false, true); // Don't force close, restart immediately
-          }
-        },
-        { type: 'separator' },
-        { label: 'Restart', click: () => { app.relaunch(); app.quit(); } }
-      ]);
-      tray.setContextMenu(newMenu);
-      tray.setToolTip(`Update v${info.version} ready - will install on restart`);
+    // Show brief notification in tray
+    if (tray && !tray.isDestroyed()) {
+      tray.setToolTip(`Installing update v${info.version}...`);
     }
+
+    // Wait 5 seconds to allow any active print jobs to complete
+    // then automatically restart and install
+    setTimeout(() => {
+      console.log('Auto-restarting to install update...');
+      autoUpdater.quitAndInstall(false, true); // Don't force close, restart immediately
+    }, 5000);
   });
 
   autoUpdater.on('error', (err) => {
@@ -406,11 +397,11 @@ app.whenReady().then(() => {
     console.log('Checking for updates...');
     autoUpdater.checkForUpdates();
 
-    // Check for updates every 6 hours
+    // Check for updates every 30 minutes for faster rollout
     setInterval(() => {
       console.log('Periodic update check...');
       autoUpdater.checkForUpdates();
-    }, 6 * 60 * 60 * 1000); // 6 hours
+    }, 30 * 60 * 1000); // 30 minutes
   }
 
 });
