@@ -451,8 +451,10 @@ app.whenReady().then(() => {
       name: 'ProSystem Print Agent',
       path: app.getPath('exe'),
     });
-    autoLauncher.isEnabled().then((isEnabled) => {
-      if (!isEnabled) autoLauncher.enable();
+
+    // Always enable auto-launch on startup to ensure it persists across updates
+    autoLauncher.enable().catch(err => {
+      console.error('Failed to enable auto-launch:', err);
     });
 
     // Check for updates on startup (only in production)
