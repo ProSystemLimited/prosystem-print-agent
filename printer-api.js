@@ -656,6 +656,14 @@ async function startApi(webContents) {
 
     const api = express();
 
+    // Add Private Network Access header for Chrome's Private Network Access security
+    // MUST be set BEFORE CORS middleware to work properly
+    // Allows access from all origins (public HTTPS sites can access localhost)
+    api.use((_req, res, next) => {
+      res.setHeader('Access-Control-Allow-Private-Network', 'true');
+      next();
+    });
+
     // Enable CORS for all origins with full OPTIONS support
     api.use(cors({
       origin: '*',
@@ -665,13 +673,6 @@ async function startApi(webContents) {
       preflightContinue: false,
       optionsSuccessStatus: 204
     }));
-
-    // Add Private Network Access header for Chrome's Private Network Access security
-    // Allows access from all origins (public HTTPS sites can access localhost)
-    api.use((_req, res, next) => {
-      res.setHeader('Access-Control-Allow-Private-Network', 'true');
-      next();
-    });
 
     api.use(bodyParser.json({ limit: '1mb' }));
 
