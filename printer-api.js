@@ -666,6 +666,13 @@ async function startApi(webContents) {
       optionsSuccessStatus: 204
     }));
 
+    // Add Private Network Access header for Chrome's Private Network Access security
+    // Allows access from all origins (public HTTPS sites can access localhost)
+    api.use((_req, res, next) => {
+      res.setHeader('Access-Control-Allow-Private-Network', 'true');
+      next();
+    });
+
     api.use(bodyParser.json({ limit: '1mb' }));
 
     // Add graceful shutdown endpoint

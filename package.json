@@ -1,6 +1,6 @@
 {
   "name": "prosystem-print-agent",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Silent local print agent for dynamic barcode/receipt printing",
   "author": "ProSystem",
   "main": "main.js",
