@@ -237,12 +237,17 @@ function buildThermalReceipt(printer, data, totals) {
     // Wrap the item name to fit within the item column
     const wrappedLines = wrapText(itemName, itemColumnWidth);
 
+    // Determine price display: show "(inc.)" for bundle items with price 0
+    const priceDisplay = (item.isBundleExpanded && item.unitPrice === 0) 
+        ? '(inc.)' 
+        : CommaFormatted(CurrencyFormatted(item.unitPrice));
+
     // Print first line with serial number, item name, qty, and price
     printer.tableCustom([
       { text: serialNum, align: "LEFT", width: 0.08 },
       { text: wrappedLines[0], align: "LEFT", width: 0.54 },
       { text: item.quantity.toString(), align: "CENTER", width: 0.15 },
-      { text: CommaFormatted(CurrencyFormatted(item.unitPrice)), align: "RIGHT", width: 0.23 }
+      { text: priceDisplay, align: "RIGHT", width: 0.23 }
     ]);
 
     // Print remaining lines (if any) with empty serial/qty/price columns
@@ -356,6 +361,7 @@ function buildThermalReceipt(printer, data, totals) {
  * @returns {number} - Recommended character count per line
  */
 function getOptimalCharacterWidth(widthMM) {
+  if (widthMM >= 76 && widthMM <= 80) return 44; // Test value
   // Standard thermal printer paper widths and their character counts
   // Based on Font A (12x24) at 203 DPI with 3mm margins
   const standardWidths = {
