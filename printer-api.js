@@ -287,39 +287,48 @@ function buildThermalReceipt(printer, data, totals) {
   ));
 
   // Payments - Manual spacing for full width
-  if (totals.payments.length > 0) {
-    printer.drawLine();
-    totals.payments.forEach(payment => {
-      printer.println(createTwoColumnLine(
-        payment.method,
-        CommaFormatted(CurrencyFormatted(payment.amount)),
-        charWidth
-      ));
+if (totals.payments.length > 0) {
 
-      if (payment.createdAt) {
-        const paymentDate = `${formatDate(payment.createdAt)}, ${formatTime(payment.createdAt)}`;
-        printer.println(`  ${paymentDate}, ${payment.user || 'Admin'}`);
-      }
-    });
+  printer.drawLine();
 
-    printer.drawLine();
+  totals.payments.forEach(payment => {
+    // Display method with detail if exists (e.g., "Card - Visa")
+    const displayMethod = payment.methodDetail 
+      ? `${payment.method} - ${payment.methodDetail}` 
+      : payment.method;
 
-    if (totals.totalPaid > 0) {
-      printer.println(createTwoColumnLine(
-        "PAID",
-        `${CommaFormatted(CurrencyFormatted(totals.totalPaid))}`,
-        charWidth
-      ));
+    printer.println(createTwoColumnLine(
+      displayMethod,
+      CommaFormatted(CurrencyFormatted(payment.amount)),
+      charWidth
+    ));
+
+    if (payment.createdAt) {
+      const paymentDate = `${formatDate(payment.createdAt)}, ${formatTime(payment.createdAt)}`;
+      printer.println(`  ${paymentDate}, ${payment.user || 'Admin'}`);
     }
 
-    if (totals.balanceDue > 0) {
-      printer.println(createTwoColumnLine(
-        "DUE",
-        `${CommaFormatted(CurrencyFormatted(totals.balanceDue))}`,
-        charWidth
-      ));
-    }
+  });
+
+  printer.drawLine();
+
+  if (totals.totalPaid > 0) {
+    printer.println(createTwoColumnLine(
+      "PAID",
+      `${CommaFormatted(CurrencyFormatted(totals.totalPaid))}`,
+      charWidth
+    ));
   }
+
+  if (totals.balanceDue > 0) {
+    printer.println(createTwoColumnLine(
+      "DUE",
+      `${CommaFormatted(CurrencyFormatted(totals.balanceDue))}`,
+      charWidth
+    ));
+  }
+
+}
 
   // Notes
   const visibleNotes = (data.notes || []).filter(n => n.visibleOnInvoice);
