@@ -8,35 +8,68 @@ let autoUpdater;
 
 // Force kill old instance if graceful shutdown fails (for old versions without /shutdown endpoint)
 function forceKillOldInstance() {
-  if (process.platform !== 'win32') {
-    console.log('Force kill only supported on Windows. Quitting.');
-    app.quit();
-    return;
-  }
-
   console.log('Finding and terminating processes on ports 21321 and 21322...');
 
-  // Kill process on port 21321 (HTTP API)
-  exec('netstat -ano | findstr ":21321 "', (_error, stdout) => {
-    if (stdout) {
-      const lines = stdout.trim().split('\n');
-      const pids = new Set();
+  if (process.platform === 'win32') {
+    // Windows: Use netstat and taskkill
+    exec('netstat -ano | findstr ":21321 "', (_error, stdout) => {
+      if (stdout) {
+        const lines = stdout.trim().split('\n');
+        const pids = new Set();
 
-      lines.forEach(line => {
-        const portPattern = /:21321\s/;
-        if (portPattern.test(line)) {
-          const parts = line.trim().split(/\s+/);
-          const pid = parts[parts.length - 1];
-          if (pid && !isNaN(pid) && pid !== '0') {
-            pids.add(pid);
+        lines.forEach(line => {
+          const portPattern = /:21321\s/;
+          if (portPattern.test(line)) {
+            const parts = line.trim().split(/\s+/);
+            const pid = parts[parts.length - 1];
+            if (pid && !isNaN(pid) && pid !== '0') {
+              pids.add(pid);
+            }
           }
-        }
-      });
+        });
 
-      if (pids.size > 0) {
-        console.log(`Killing processes: ${Array.from(pids).join(', ')}`);
+        if (pids.size > 0) {
+          console.log(`Killing processes: ${Array.from(pids).join(', ')}`);
+          pids.forEach(pid => {
+            exec(`taskkill /F /PID ${pid}`, (err) => {
+              if (err) {
+                console.error(`Failed to kill PID ${pid}:`, err.message);
+              } else {
+                console.log(`Successfully killed PID ${pid}`);
+              }
+            });
+          });
+
+          // Wait for processes to be killed, then relaunch
+          setTimeout(() => {
+            console.log('Old instance terminated. Relaunching new instance...');
+            app.relaunch();
+            app.quit();
+          }, 2000);
+        } else {
+          console.log('No processes found on port 21321. Quitting.');
+          app.quit();
+        }
+      } else {
+        console.log('Could not find processes. Quitting.');
+        app.quit();
+      }
+    });
+  } else if (process.platform === 'darwin') {
+    // macOS: Use lsof and kill
+    exec('lsof -ti:21321', (error, stdout) => {
+      if (error || !stdout) {
+        console.log('No processes found on port 21321. Quitting.');
+        app.quit();
+        return;
+      }
+
+      const pids = stdout.trim().split('\n').filter(pid => pid && !isNaN(pid));
+      
+      if (pids.length > 0) {
+        console.log(`Killing processes: ${pids.join(', ')}`);
         pids.forEach(pid => {
-          exec(`taskkill /F /PID ${pid}`, (err) => {
+          exec(`kill -9 ${pid}`, (err) => {
             if (err) {
               console.error(`Failed to kill PID ${pid}:`, err.message);
             } else {
@@ -55,11 +88,41 @@ function forceKillOldInstance() {
         console.log('No processes found on port 21321. Quitting.');
         app.quit();
       }
-    } else {
-      console.log('Could not find processes. Quitting.');
-      app.quit();
-    }
-  });
+    });
+  } else {
+    // Linux/Other: Use lsof and kill
+    exec('lsof -ti:21321', (error, stdout) => {
+      if (error || !stdout) {
+        console.log('No processes found on port 21321. Quitting.');
+        app.quit();
+        return;
+      }
+
+      const pids = stdout.trim().split('\n').filter(pid => pid && !isNaN(pid));
+      
+      if (pids.length > 0) {
+        console.log(`Killing processes: ${pids.join(', ')}`);
+        pids.forEach(pid => {
+          exec(`kill -9 ${pid}`, (err) => {
+            if (err) {
+              console.error(`Failed to kill PID ${pid}:`, err.message);
+            } else {
+              console.log(`Successfully killed PID ${pid}`);
+            }
+          });
+        });
+
+        setTimeout(() => {
+          console.log('Old instance terminated. Relaunching new instance...');
+          app.relaunch();
+          app.quit();
+        }, 2000);
+      } else {
+        console.log('No processes found on port 21321. Quitting.');
+        app.quit();
+      }
+    });
+  }
 }
 
 // **CRITICAL**: This prevents multiple instances of the agent from running.
@@ -200,7 +263,18 @@ const createStatusWindow = () => {
     return;
   }
 
-  const iconPath = path.join(__dirname, 'build', 'web-app-manifest-512x512.ico');
+  // Platform-specific icon paths
+  const getStatusIconPath = () => {
+    if (process.platform === 'darwin') {
+      return path.join(__dirname, 'build', 'icon.icns');
+    } else if (process.platform === 'win32') {
+      return path.join(__dirname, 'build', 'web-app-manifest-512x512.ico');
+    } else {
+      return path.join(__dirname, 'build', 'icon.png');
+    }
+  };
+
+  const iconPath = getStatusIconPath();
 
   statusWindow = new BrowserWindow({
     width: 400,
@@ -262,7 +336,21 @@ app.whenReady().then(() => {
   // Initialize auto-updater
   setupAutoUpdater();
 
-  const appIconPath = path.join(__dirname, 'build', 'web-app-manifest-512x512.ico');
+  // Platform-specific icon paths
+  const getAppIconPath = () => {
+    if (process.platform === 'darwin') {
+      // macOS uses .icns files
+      return path.join(__dirname, 'build', 'icon.icns');
+    } else if (process.platform === 'win32') {
+      // Windows uses .ico files
+      return path.join(__dirname, 'build', 'web-app-manifest-512x512.ico');
+    } else {
+      // Linux uses .png files
+      return path.join(__dirname, 'build', 'icon.png');
+    }
+  };
+
+  const appIconPath = getAppIconPath();
 
   shellWindow = new BrowserWindow({
     show: false,
@@ -292,8 +380,19 @@ app.whenReady().then(() => {
   });
 
   // Create tray icon with proper handling to ensure it always displays
-  // Store path globally to prevent issues
-  trayIconPath = path.join(__dirname, 'build', 'web-app-manifest-512x512.ico');
+  // Store path globally to prevent issues - platform-specific icon paths
+  const getTrayIconPath = () => {
+    if (process.platform === 'darwin') {
+      // macOS tray icons work best with .png or .icns
+      return path.join(__dirname, 'build', 'icon.png');
+    } else if (process.platform === 'win32') {
+      return path.join(__dirname, 'build', 'web-app-manifest-512x512.ico');
+    } else {
+      return path.join(__dirname, 'build', 'icon.png');
+    }
+  };
+  
+  trayIconPath = getTrayIconPath();
 
   // Function to create or recreate the tray icon
   const createTray = () => {
@@ -308,11 +407,22 @@ app.whenReady().then(() => {
       // Ensure icon is valid and not empty
       if (icon.isEmpty()) {
         console.error('Failed to load tray icon from:', trayIconPath);
-        // Try fallback to other icon files
-        const fallbackPaths = [
-          path.join(__dirname, 'build', 'icon.ico'),
-          path.join(__dirname, 'build', 'favicon-32x32.png')
-        ];
+        // Try fallback to other icon files - platform-specific
+        const fallbackPaths = process.platform === 'darwin'
+          ? [
+              path.join(__dirname, 'build', 'icon.icns'),
+              path.join(__dirname, 'build', 'icon.png'),
+              path.join(__dirname, 'build', 'favicon-32x32.png')
+            ]
+          : process.platform === 'win32'
+          ? [
+              path.join(__dirname, 'build', 'icon.ico'),
+              path.join(__dirname, 'build', 'favicon-32x32.png')
+            ]
+          : [
+              path.join(__dirname, 'build', 'icon.png'),
+              path.join(__dirname, 'build', 'favicon-32x32.png')
+            ];
 
         for (const fallbackPath of fallbackPaths) {
           icon = nativeImage.createFromPath(fallbackPath);
@@ -447,9 +557,19 @@ app.whenReady().then(() => {
   });
 
   if (app.isPackaged) {
+    // Platform-specific auto-launch path
+    let autoLaunchPath;
+    if (process.platform === 'darwin') {
+      // macOS: Use the app bundle path
+      autoLaunchPath = app.getPath('exe').replace(/\/Contents\/MacOS\/[^/]+$/, '');
+    } else {
+      // Windows/Linux: Use executable path
+      autoLaunchPath = app.getPath('exe');
+    }
+
     const autoLauncher = new AutoLaunch({
       name: 'ProSystem Print Agent',
-      path: app.getPath('exe'),
+      path: autoLaunchPath,
     });
 
     // Always enable auto-launch on startup to ensure it persists across updates

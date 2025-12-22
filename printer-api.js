@@ -545,60 +545,88 @@ async function attemptGracefulShutdown(port) {
 }
 
 /**
- * Kill processes using specific ports (Windows-specific)
+ * Kill processes using specific ports (Cross-platform)
  * @param {number} port - Port number to free up
  */
 async function killProcessOnPort(port) {
   return new Promise((resolve) => {
-    if (process.platform !== 'win32') {
-      resolve(false);
-      return;
-    }
-
     const { exec } = require('child_process');
 
-    // Find the PID using the port - use word boundary to match exact port
-    exec(`netstat -ano | findstr ":${port} "`, (error, stdout) => {
-      if (error || !stdout) {
-        resolve(false);
-        return;
-      }
-
-      // Extract PID from netstat output
-      const lines = stdout.trim().split('\n');
-      const pids = new Set();
-
-      lines.forEach(line => {
-        // More precise check: ensure we're matching the exact port number
-        // Look for patterns like ":21321 " (with space after) to avoid matching :213210
-        const portPattern = new RegExp(`:${port}\\s`);
-        if (portPattern.test(line)) {
-          const parts = line.trim().split(/\s+/);
-          const pid = parts[parts.length - 1];
-          if (pid && !isNaN(pid) && pid !== '0') {
-            pids.add(pid);
-          }
+    if (process.platform === 'win32') {
+      // Windows: Use netstat and taskkill
+      exec(`netstat -ano | findstr ":${port} "`, (error, stdout) => {
+        if (error || !stdout) {
+          resolve(false);
+          return;
         }
-      });
 
-      if (pids.size === 0) {
-        resolve(false);
-        return;
-      }
+        // Extract PID from netstat output
+        const lines = stdout.trim().split('\n');
+        const pids = new Set();
 
-      // Kill all PIDs found
-      let killCount = 0;
-      pids.forEach(pid => {
-        exec(`taskkill /F /PID ${pid}`, (killError) => {
-          killCount++;
-          if (killCount === pids.size) {
-            console.log(`Forcefully terminated ${pids.size} process(es) on port ${port}`);
-            // Wait a bit for the OS to release the port
-            setTimeout(() => resolve(true), 1500);
+        lines.forEach(line => {
+          // More precise check: ensure we're matching the exact port number
+          // Look for patterns like ":21321 " (with space after) to avoid matching :213210
+          const portPattern = new RegExp(`:${port}\\s`);
+          if (portPattern.test(line)) {
+            const parts = line.trim().split(/\s+/);
+            const pid = parts[parts.length - 1];
+            if (pid && !isNaN(pid) && pid !== '0') {
+              pids.add(pid);
+            }
           }
         });
+
+        if (pids.size === 0) {
+          resolve(false);
+          return;
+        }
+
+        // Kill all PIDs found
+        let killCount = 0;
+        pids.forEach(pid => {
+          exec(`taskkill /F /PID ${pid}`, (killError) => {
+            killCount++;
+            if (killCount === pids.size) {
+              console.log(`Forcefully terminated ${pids.size} process(es) on port ${port}`);
+              // Wait a bit for the OS to release the port
+              setTimeout(() => resolve(true), 1500);
+            }
+          });
+        });
       });
-    });
+    } else {
+      // macOS/Linux: Use lsof and kill
+      exec(`lsof -ti:${port}`, (error, stdout) => {
+        if (error || !stdout) {
+          resolve(false);
+          return;
+        }
+
+        const pids = stdout.trim().split('\n').filter(pid => pid && !isNaN(pid));
+        
+        if (pids.length === 0) {
+          resolve(false);
+          return;
+        }
+
+        // Kill all PIDs found
+        let killCount = 0;
+        pids.forEach(pid => {
+          exec(`kill -9 ${pid}`, (killError) => {
+            killCount++;
+            if (killError) {
+              console.error(`Failed to kill PID ${pid}:`, killError.message);
+            }
+            if (killCount === pids.length) {
+              console.log(`Forcefully terminated ${pids.length} process(es) on port ${port}`);
+              // Wait a bit for the OS to release the port
+              setTimeout(() => resolve(true), 1500);
+            }
+          });
+        });
+      });
+    }
   });
 }
 
@@ -795,6 +823,7 @@ async function startApi(webContents) {
 
       // Detect if this is a PDF/virtual printer (shows save dialog)
       const pdfPrinterNames = [
+        // Windows PDF printers
         'Microsoft Print to PDF',
         'Microsoft XPS Document Writer',
         'Adobe PDF',
@@ -803,7 +832,10 @@ async function startApi(webContents) {
         'Foxit Reader PDF Printer',
         'Bullzip PDF Printer',
         'OneNote',
-        'Fax'
+        'Fax',
+        // macOS PDF printers
+        'Save as PDF',
+        'Save as PostScript'
       ];
       const isPdfPrinter = pdfPrinterNames.some(name =>
         printer.name.toLowerCase().includes(name.toLowerCase())
@@ -1001,7 +1033,7 @@ async function startApi(webContents) {
           try {
             printer.printDirect({
               data: buffer,
-              printer: printerInfo.name,  // Windows printer name!
+              printer: printerInfo.name,  // Printer name (platform-specific: Windows name or macOS CUPS name)
               type: 'RAW',  // This is the key - sends raw ESC/POS bytes
               success: (jobID) => {
                 clearTimeout(timeout);
@@ -1092,6 +1124,7 @@ function formatPrinterList(rawPrinters) {
 
   // List of known PDF/virtual printers
   const pdfPrinters = [
+    // Windows PDF printers
     'Microsoft Print to PDF',
     'Microsoft XPS Document Writer',
     'Adobe PDF',
@@ -1100,7 +1133,10 @@ function formatPrinterList(rawPrinters) {
     'Foxit Reader PDF Printer',
     'Bullzip PDF Printer',
     'OneNote',
-    'Fax'
+    'Fax',
+    // macOS PDF printers
+    'Save as PDF',
+    'Save as PostScript'
   ];
 
   return rawPrinters.map(p => {
