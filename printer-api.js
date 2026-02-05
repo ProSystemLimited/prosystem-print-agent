@@ -101,23 +101,79 @@ function CurrencyFormatted(amount, currency = 'BDT') {
   return s;
 }
 
-async function validateAndConvertImage(base64Data) {
+/**
+ * Download or decode an image and convert it to a small, high-contrast PNG buffer
+ * suitable for thermal printers (max width ~260px).
+ *
+ * Accepts:
+ * - Data URI (data:image/png;base64,...)
+ * - Raw base64 string
+ * - http/https URL
+ */
+async function validateAndConvertImage(imageSource) {
   const sharp = require('sharp'); // npm install sharp
+  const http = require('http');
+  const https = require('https');
+
+  const fetchBufferFromUrl = (url, redirects = 0) => new Promise((resolve, reject) => {
+    const client = url.startsWith('https') ? https : http;
+    const req = client.get(url, { timeout: 10000, headers: { 'User-Agent': 'prosystem-print-agent/1.0' } }, (res) => {
+      // Handle redirects (up to 3 hops)
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        if (redirects >= 3) return reject(new Error('Too many redirects while fetching logo'));
+        return resolve(fetchBufferFromUrl(res.headers.location, redirects + 1));
+      }
+
+      if (res.statusCode !== 200) {
+        return reject(new Error(`HTTP ${res.statusCode}`));
+      }
+
+      const chunks = [];
+      let total = 0;
+      const maxBytes = 2 * 1024 * 1024; // 2 MB safety cap
+
+      res.on('data', (chunk) => {
+        total += chunk.length;
+        if (total > maxBytes) {
+          req.destroy(new Error('Image too large'));
+          return reject(new Error('Image too large'));
+        }
+        chunks.push(chunk);
+      });
+
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Image download timed out'));
+    });
+  });
 
   try {
-    // Remove data URI prefix if present
-    const base64String = base64Data.includes(',')
-      ? base64Data.split(',')[1]
-      : base64Data;
+    let buffer;
 
-    const buffer = Buffer.from(base64String, 'base64');
+    const isUrl = /^https?:\/\//i.test(imageSource);
+    if (isUrl) {
+      buffer = await fetchBufferFromUrl(imageSource);
+    } else {
+      // Remove data URI prefix if present
+      const base64String = imageSource.includes(',')
+        ? imageSource.split(',')[1]
+        : imageSource;
+      buffer = Buffer.from(base64String, 'base64');
+    }
 
-    // Convert to PNG and resize for thermal printer (max width 200px)
+    // Convert to PNG, flatten transparency, and apply threshold for thermal clarity
     const processedBuffer = await sharp(buffer)
-      .resize({ width: 200, fit: 'inside' })
+      .flatten({ background: '#FFFFFF' }) // remove transparency to avoid inverted artifacts
+      .resize({ width: 300, fit: 'inside' })
+      .threshold(180) // make it high-contrast for thermal printing
       .png()
       .toBuffer();
 
+    console.log(`Logo prepared: ${processedBuffer.length} bytes (source ~${buffer.length} bytes)`);
     return processedBuffer;
   } catch (error) {
     console.error('Image validation failed:', error);
@@ -125,7 +181,7 @@ async function validateAndConvertImage(base64Data) {
   }
 }
 
-function buildThermalReceipt(printer, data, totals) {
+async function buildThermalReceipt(printer, data, totals) {
   // Get character width from printer config
   const charWidth = printer.config.width;
 
@@ -137,7 +193,24 @@ function buildThermalReceipt(printer, data, totals) {
   printer.setTextQuadArea(); // Make it even bigger - 2x width and 2x height
   printer.bold(true); // Ensure bold is enabled for organization name
 
-  printer.println(data.displayName || 'Organization');
+  // Logo (base64, data URI, or URL). Fall back to text name only if logo is absent or fails.
+  let logoBuffer = null;
+  if (data.logo) {
+    try {
+      logoBuffer = await validateAndConvertImage(data.logo);
+    } catch (err) {
+      console.error('Logo render failed, falling back to text header:', err);
+    }
+  }
+
+  if (logoBuffer) {
+    await printer.printImageBuffer(logoBuffer);
+    printer.newLine();
+    printer.newLine(); // add a full blank line after logo
+  } else {
+    printer.println(data.displayName || 'Organization');
+  }
+
   printer.invert(false); // Reset invert
   printer.setTextNormal();
   printer.bold(true); // Re-enable bold after setTextNormal resets it
@@ -181,7 +254,7 @@ function buildThermalReceipt(printer, data, totals) {
 
   // Invoice Info - Manual spacing for full width
   printer.println(createTwoColumnLine(
-    `INVOICE ${data.invoiceNumber}`,
+    `${(data.status !== 'Draft' && data.status !== 'Request') ? 'INVOICE' : 'QUOTATION'} ${data.invoiceNumber}`,
     formatDate(data.createdAt),
     charWidth
   ));
@@ -346,6 +419,26 @@ if (totals.payments.length > 0) {
     });
   }
 
+  // Terms & Conditions (HTML from React Quill)
+  if (data.termsAndConditions) {
+    const termsLines = htmlToReceiptLines(data.termsAndConditions, charWidth);
+    const hasVisibleTerms = termsLines.some(line => line && line.trim().length > 0);
+
+    if (hasVisibleTerms) {
+      printer.newLine();
+      printer.drawLine();
+      printer.bold(true);
+      printer.println('Terms & Conditions');
+      // Body should be normal weight
+      printer.bold(false);
+
+      termsLines.forEach(line => printer.println(line));
+
+      // Restore bold for the rest of the receipt
+      printer.bold(true);
+    }
+  }
+
   // Footer
   printer.newLine();
   printer.alignCenter();
@@ -472,6 +565,53 @@ function wrapText(text, maxWidth) {
   return lines;
 }
 
+/**
+ * Convert basic HTML (React Quill output) into wrapped receipt lines
+ * Supports paragraphs, line breaks, and bullet lists.
+ */
+function htmlToReceiptLines(html, maxWidth) {
+  if (!html) return [];
+
+  let text = html;
+
+  // Normalize common block/line elements to newlines
+  text = text.replace(/<\s*br\s*\/?>/gi, '\n');
+  text = text.replace(/<\s*\/p\s*>/gi, '\n\n');
+  text = text.replace(/<\s*p[^>]*>/gi, '');
+  text = text.replace(/<\s*li[^>]*>/gi, '- ');
+  text = text.replace(/<\s*\/li\s*>/gi, '\n');
+  text = text.replace(/<\s*(ul|ol)[^>]*>/gi, '');
+  text = text.replace(/<\s*\/(ul|ol)\s*>/gi, '\n');
+
+  // Decode a few common entities
+  text = text.replace(/&nbsp;/gi, ' ');
+  text = text.replace(/&amp;/gi, '&');
+  text = text.replace(/&lt;/gi, '<');
+  text = text.replace(/&gt;/gi, '>');
+  text = text.replace(/&#39;/gi, "'");
+  text = text.replace(/&quot;/gi, '"');
+
+  // Strip remaining tags
+  text = text.replace(/<[^>]+>/g, '');
+
+  // Clean whitespace
+  text = text.replace(/\r\n/g, '\n');
+  text = text.replace(/\n{3,}/g, '\n\n');
+  text = text.trim();
+
+  const lines = [];
+  text.split('\n').forEach(block => {
+    const trimmed = block.trim();
+    if (trimmed.length === 0) {
+      lines.push(''); // preserve intentional blank line
+    } else {
+      lines.push(...wrapText(trimmed, maxWidth));
+    }
+  });
+
+  return lines;
+}
+
 let wss;
 let globalWebContents;
 let httpServer;
@@ -545,88 +685,60 @@ async function attemptGracefulShutdown(port) {
 }
 
 /**
- * Kill processes using specific ports (Cross-platform)
+ * Kill processes using specific ports (Windows-specific)
  * @param {number} port - Port number to free up
  */
 async function killProcessOnPort(port) {
   return new Promise((resolve) => {
+    if (process.platform !== 'win32') {
+      resolve(false);
+      return;
+    }
+
     const { exec } = require('child_process');
 
-    if (process.platform === 'win32') {
-      // Windows: Use netstat and taskkill
-      exec(`netstat -ano | findstr ":${port} "`, (error, stdout) => {
-        if (error || !stdout) {
-          resolve(false);
-          return;
+    // Find the PID using the port - use word boundary to match exact port
+    exec(`netstat -ano | findstr ":${port} "`, (error, stdout) => {
+      if (error || !stdout) {
+        resolve(false);
+        return;
+      }
+
+      // Extract PID from netstat output
+      const lines = stdout.trim().split('\n');
+      const pids = new Set();
+
+      lines.forEach(line => {
+        // More precise check: ensure we're matching the exact port number
+        // Look for patterns like ":21321 " (with space after) to avoid matching :213210
+        const portPattern = new RegExp(`:${port}\\s`);
+        if (portPattern.test(line)) {
+          const parts = line.trim().split(/\s+/);
+          const pid = parts[parts.length - 1];
+          if (pid && !isNaN(pid) && pid !== '0') {
+            pids.add(pid);
+          }
         }
+      });
 
-        // Extract PID from netstat output
-        const lines = stdout.trim().split('\n');
-        const pids = new Set();
+      if (pids.size === 0) {
+        resolve(false);
+        return;
+      }
 
-        lines.forEach(line => {
-          // More precise check: ensure we're matching the exact port number
-          // Look for patterns like ":21321 " (with space after) to avoid matching :213210
-          const portPattern = new RegExp(`:${port}\\s`);
-          if (portPattern.test(line)) {
-            const parts = line.trim().split(/\s+/);
-            const pid = parts[parts.length - 1];
-            if (pid && !isNaN(pid) && pid !== '0') {
-              pids.add(pid);
-            }
+      // Kill all PIDs found
+      let killCount = 0;
+      pids.forEach(pid => {
+        exec(`taskkill /F /PID ${pid}`, (killError) => {
+          killCount++;
+          if (killCount === pids.size) {
+            console.log(`Forcefully terminated ${pids.size} process(es) on port ${port}`);
+            // Wait a bit for the OS to release the port
+            setTimeout(() => resolve(true), 1500);
           }
         });
-
-        if (pids.size === 0) {
-          resolve(false);
-          return;
-        }
-
-        // Kill all PIDs found
-        let killCount = 0;
-        pids.forEach(pid => {
-          exec(`taskkill /F /PID ${pid}`, (killError) => {
-            killCount++;
-            if (killCount === pids.size) {
-              console.log(`Forcefully terminated ${pids.size} process(es) on port ${port}`);
-              // Wait a bit for the OS to release the port
-              setTimeout(() => resolve(true), 1500);
-            }
-          });
-        });
       });
-    } else {
-      // macOS/Linux: Use lsof and kill
-      exec(`lsof -ti:${port}`, (error, stdout) => {
-        if (error || !stdout) {
-          resolve(false);
-          return;
-        }
-
-        const pids = stdout.trim().split('\n').filter(pid => pid && !isNaN(pid));
-        
-        if (pids.length === 0) {
-          resolve(false);
-          return;
-        }
-
-        // Kill all PIDs found
-        let killCount = 0;
-        pids.forEach(pid => {
-          exec(`kill -9 ${pid}`, (killError) => {
-            killCount++;
-            if (killError) {
-              console.error(`Failed to kill PID ${pid}:`, killError.message);
-            }
-            if (killCount === pids.length) {
-              console.log(`Forcefully terminated ${pids.length} process(es) on port ${port}`);
-              // Wait a bit for the OS to release the port
-              setTimeout(() => resolve(true), 1500);
-            }
-          });
-        });
-      });
-    }
+    });
   });
 }
 
@@ -823,7 +935,6 @@ async function startApi(webContents) {
 
       // Detect if this is a PDF/virtual printer (shows save dialog)
       const pdfPrinterNames = [
-        // Windows PDF printers
         'Microsoft Print to PDF',
         'Microsoft XPS Document Writer',
         'Adobe PDF',
@@ -832,10 +943,7 @@ async function startApi(webContents) {
         'Foxit Reader PDF Printer',
         'Bullzip PDF Printer',
         'OneNote',
-        'Fax',
-        // macOS PDF printers
-        'Save as PDF',
-        'Save as PostScript'
+        'Fax'
       ];
       const isPdfPrinter = pdfPrinterNames.some(name =>
         printer.name.toLowerCase().includes(name.toLowerCase())
@@ -1033,7 +1141,7 @@ async function startApi(webContents) {
           try {
             printer.printDirect({
               data: buffer,
-              printer: printerInfo.name,  // Printer name (platform-specific: Windows name or macOS CUPS name)
+              printer: printerInfo.name,  // Windows printer name!
               type: 'RAW',  // This is the key - sends raw ESC/POS bytes
               success: (jobID) => {
                 clearTimeout(timeout);
@@ -1124,7 +1232,6 @@ function formatPrinterList(rawPrinters) {
 
   // List of known PDF/virtual printers
   const pdfPrinters = [
-    // Windows PDF printers
     'Microsoft Print to PDF',
     'Microsoft XPS Document Writer',
     'Adobe PDF',
@@ -1133,10 +1240,7 @@ function formatPrinterList(rawPrinters) {
     'Foxit Reader PDF Printer',
     'Bullzip PDF Printer',
     'OneNote',
-    'Fax',
-    // macOS PDF printers
-    'Save as PDF',
-    'Save as PostScript'
+    'Fax'
   ];
 
   return rawPrinters.map(p => {
