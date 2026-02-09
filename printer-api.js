@@ -301,7 +301,7 @@ async function buildThermalReceipt(printer, data, totals) {
 
   // Items - Full width for each item
   data.items.forEach((item, index) => {
-    const itemName = [item.variantName, item.itemName].filter(Boolean).join(' - ');
+    const itemName = [`${item.itemSku}`, item.variantName, item.itemName].filter(Boolean).join(' - ');
     const serialNum = `${index + 1}.`;
 
     // Calculate max characters that fit in the item column (54% of width)
