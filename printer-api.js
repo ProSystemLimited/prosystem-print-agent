@@ -290,12 +290,14 @@ async function buildThermalReceipt(printer, data, totals) {
   }
 
   // Items Header - Full width table
+  const tableCols = getItemTableColumns(charWidth);
   printer.drawLine();
   printer.tableCustom([
-    { text: "Sl", align: "LEFT", width: 0.08 },
-    { text: "Item", align: "LEFT", width: 0.54 },
-    { text: "Qty", align: "CENTER", width: 0.15 },
-    { text: "Price", align: "RIGHT", width: 0.23 }
+    { text: "Sl", align: "LEFT", cols: tableCols.sl },
+    { text: "Item", align: "LEFT", cols: tableCols.item },
+    { text: "Qty", align: "RIGHT", cols: tableCols.qty },
+    { text: "Rate", align: "RIGHT", cols: tableCols.rate },
+    { text: "Amount", align: "RIGHT", cols: tableCols.amount }
   ]);
   printer.drawLine();
 
@@ -304,32 +306,39 @@ async function buildThermalReceipt(printer, data, totals) {
     const itemName = [`${item.itemSku}`, item.variantName, item.itemName].filter(Boolean).join(' - ');
     const serialNum = `${index + 1}.`;
 
-    // Calculate max characters that fit in the item column (54% of width)
-    const itemColumnWidth = Math.floor(charWidth * 0.54);
+    // Calculate max characters that fit in the item column
+    const itemColumnWidth = tableCols.item;
 
     // Wrap the item name to fit within the item column
     const wrappedLines = wrapText(itemName, itemColumnWidth);
 
-    // Determine price display: show "(inc.)" for bundle items with price 0
-    const priceDisplay = (item.isBundleExpanded && item.unitPrice === 0) 
+    // Determine rate display: show "(inc.)" for bundle items with rate 0
+    const rateDisplay = (item.isBundleExpanded && item.unitPrice === 0) 
         ? '(inc.)' 
         : CommaFormatted(CurrencyFormatted(item.unitPrice));
 
-    // Print first line with serial number, item name, qty, and price
+    const itemQuantity = Number(item.quantity) || 0;
+    const itemRate = Number(item.unitPrice) || 0;
+    const quantityDisplay = (item.quantity ?? 0).toString();
+    const amountDisplay = CommaFormatted(CurrencyFormatted(itemRate * itemQuantity));
+
+    // Print first line with serial number, item name, qty, rate, and amount
     printer.tableCustom([
-      { text: serialNum, align: "LEFT", width: 0.08 },
-      { text: wrappedLines[0], align: "LEFT", width: 0.54 },
-      { text: item.quantity.toString(), align: "CENTER", width: 0.15 },
-      { text: priceDisplay, align: "RIGHT", width: 0.23 }
+      { text: serialNum, align: "LEFT", cols: tableCols.sl },
+      { text: wrappedLines[0], align: "LEFT", cols: tableCols.item },
+      { text: quantityDisplay, align: "RIGHT", cols: tableCols.qty },
+      { text: rateDisplay, align: "RIGHT", cols: tableCols.rate },
+      { text: amountDisplay, align: "RIGHT", cols: tableCols.amount }
     ]);
 
-    // Print remaining lines (if any) with empty serial/qty/price columns
+    // Print remaining lines (if any) with empty serial/qty/rate/amount columns
     for (let i = 1; i < wrappedLines.length; i++) {
       printer.tableCustom([
-        { text: "", align: "LEFT", width: 0.08 },
-        { text: wrappedLines[i], align: "LEFT", width: 0.54 },
-        { text: "", align: "CENTER", width: 0.15 },
-        { text: "", align: "RIGHT", width: 0.23 }
+        { text: "", align: "LEFT", cols: tableCols.sl },
+        { text: wrappedLines[i], align: "LEFT", cols: tableCols.item },
+        { text: "", align: "RIGHT", cols: tableCols.qty },
+        { text: "", align: "RIGHT", cols: tableCols.rate },
+        { text: "", align: "RIGHT", cols: tableCols.amount }
       ]);
     }
   });
@@ -360,48 +369,48 @@ async function buildThermalReceipt(printer, data, totals) {
   ));
 
   // Payments - Manual spacing for full width
-if (totals.payments.length > 0) {
+  if (totals.payments.length > 0) {
 
-  printer.drawLine();
+    printer.drawLine();
 
-  totals.payments.forEach(payment => {
-    // Display method with detail if exists (e.g., "Card - Visa")
-    const displayMethod = payment.methodDetail 
-      ? `${payment.method} - ${payment.methodDetail}` 
-      : payment.method;
+    totals.payments.forEach(payment => {
+      // Display method with detail if exists (e.g., "Card - Visa")
+      const displayMethod = payment.methodDetail
+        ? `${payment.method} - ${payment.methodDetail}`
+        : payment.method;
 
-    printer.println(createTwoColumnLine(
-      displayMethod,
-      CommaFormatted(CurrencyFormatted(payment.amount)),
-      charWidth
-    ));
+      printer.println(createTwoColumnLine(
+        displayMethod,
+        CommaFormatted(CurrencyFormatted(payment.amount)),
+        charWidth
+      ));
 
-    if (payment.createdAt) {
-      const paymentDate = `${formatDate(payment.createdAt)}, ${formatTime(payment.createdAt)}`;
-      printer.println(`  ${paymentDate}, ${payment.user || 'Admin'}`);
+      if (payment.createdAt) {
+        const paymentDate = `${formatDate(payment.createdAt)}, ${formatTime(payment.createdAt)}`;
+        printer.println(`  ${paymentDate}, ${payment.user || 'Admin'}`);
+      }
+
+    });
+
+    printer.drawLine();
+
+    if (totals.totalPaid > 0) {
+      printer.println(createTwoColumnLine(
+        "PAID",
+        `${CommaFormatted(CurrencyFormatted(totals.totalPaid))}`,
+        charWidth
+      ));
     }
 
-  });
+    if (totals.balanceDue > 0) {
+      printer.println(createTwoColumnLine(
+        "DUE",
+        `${CommaFormatted(CurrencyFormatted(totals.balanceDue))}`,
+        charWidth
+      ));
+    }
 
-  printer.drawLine();
-
-  if (totals.totalPaid > 0) {
-    printer.println(createTwoColumnLine(
-      "PAID",
-      `${CommaFormatted(CurrencyFormatted(totals.totalPaid))}`,
-      charWidth
-    ));
   }
-
-  if (totals.balanceDue > 0) {
-    printer.println(createTwoColumnLine(
-      "DUE",
-      `${CommaFormatted(CurrencyFormatted(totals.balanceDue))}`,
-      charWidth
-    ));
-  }
-
-}
 
   // Notes
   const visibleNotes = (data.notes || []).filter(n => n.visibleOnInvoice);
@@ -531,6 +540,73 @@ function createTwoColumnLine(leftText, rightText, totalWidth) {
   }
 
   return leftStr + ' '.repeat(spaceNeeded) + rightStr;
+}
+
+/**
+ * Build deterministic integer column widths for item table rows.
+ * Ensures all columns always sum to charWidth to avoid tableCustom rounding drift.
+ */
+function getItemTableColumns(charWidth) {
+  const targetWidth = Math.max(1, Math.floor(charWidth));
+  const minimums = {
+    sl: 2,
+    item: 10,
+    qty: 3,
+    rate: 6,
+    amount: 7
+  };
+  const ratios = {
+    sl: 0.07,
+    item: 0.45,
+    qty: 0.12,
+    rate: 0.16,
+    amount: 0.20
+  };
+
+  const cols = {
+    sl: Math.floor(targetWidth * ratios.sl),
+    item: Math.floor(targetWidth * ratios.item),
+    qty: Math.floor(targetWidth * ratios.qty),
+    rate: Math.floor(targetWidth * ratios.rate),
+    amount: Math.floor(targetWidth * ratios.amount)
+  };
+
+  // Enforce per-column minimums first.
+  cols.sl = Math.max(cols.sl, minimums.sl);
+  cols.item = Math.max(cols.item, minimums.item);
+  cols.qty = Math.max(cols.qty, minimums.qty);
+  cols.rate = Math.max(cols.rate, minimums.rate);
+  cols.amount = Math.max(cols.amount, minimums.amount);
+
+  // If we exceed line width, shrink less-critical columns first.
+  const shrinkOrder = ['amount', 'rate', 'qty', 'sl'];
+  let total = cols.sl + cols.item + cols.qty + cols.rate + cols.amount;
+  if (total > targetWidth) {
+    let overflow = total - targetWidth;
+    shrinkOrder.forEach((key) => {
+      if (overflow <= 0) return;
+      const reducible = cols[key] - minimums[key];
+      if (reducible <= 0) return;
+      const reduceBy = Math.min(reducible, overflow);
+      cols[key] -= reduceBy;
+      overflow -= reduceBy;
+    });
+
+    if (overflow > 0) {
+      const reducibleItem = cols.item - minimums.item;
+      const reduceBy = Math.min(reducibleItem, overflow);
+      cols.item -= reduceBy;
+      overflow -= reduceBy;
+    }
+  }
+
+  // Assign remaining slack to the item column.
+  total = cols.sl + cols.item + cols.qty + cols.rate + cols.amount;
+  if (total < targetWidth) {
+    cols.item += targetWidth - total;
+  }
+
+  return cols;
 }
 
 /**
