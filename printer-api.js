@@ -181,9 +181,15 @@ async function validateAndConvertImage(imageSource) {
   }
 }
 
+function shouldHideReceiptItemSku(data) {
+  const displayName = String(data?.displayName || '').trim().toLowerCase();
+  return displayName.includes('skinn');
+}
+
 async function buildThermalReceipt(printer, data, totals) {
   // Get character width from printer config
   const charWidth = printer.config.width;
+  const hideItemSku = shouldHideReceiptItemSku(data);
 
   // Make ALL text bold throughout the receipt
   printer.bold(true);
@@ -303,7 +309,11 @@ async function buildThermalReceipt(printer, data, totals) {
 
   // Items - Full width for each item
   data.items.forEach((item, index) => {
-    const itemName = [`${item.itemSku}`, item.variantName, item.itemName].filter(Boolean).join(' - ');
+    const itemName = [
+      hideItemSku ? null : item.itemSku,
+      item.variantName,
+      item.itemName
+    ].filter(Boolean).join(' - ');
     const serialNum = `${index + 1}.`;
 
     // Calculate max characters that fit in the item column
