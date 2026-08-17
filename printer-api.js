@@ -186,6 +186,61 @@ function shouldHideReceiptItemSku(data) {
   return displayName.includes('skinn');
 }
 
+/** Parses a value into a finite number, or returns null when it is not usable. */
+function toFiniteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+
+  const raw = typeof value === 'object' && typeof value.toString === 'function'
+    ? value.toString()
+    : value;
+
+  const parsed = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** Rounds to 2 decimals without the classic 1.005 float drift. */
+function roundCurrency(value) {
+  const parsed = toFiniteNumber(value);
+  if (parsed === null) return 0;
+  return Math.round((parsed + Number.EPSILON) * 100) / 100;
+}
+
+/**
+ * Reads the cash tender snapshot the BMS persists under
+ * `sale.customFields.cashTendering` when a sale is finalized through the cash
+ * tender / change-due step.
+ *
+ * Presence of the record is the render gate: only tenants with the cash tender
+ * feature flag on ever write it, so this stays tenant-agnostic and the thermal
+ * receipt matches the browser receipt line for line.
+ *
+ * Mirrors getSaleCashTendering() in the BMS
+ * (features/sales/tenants/tahar-by-optimize/utils/cashTendering.js).
+ *
+ * @returns {{method: string, methodDetail: string|null, amountDue: number, tendered: number, changeDue: number}|null}
+ */
+function getSaleCashTendering(data) {
+  const record = data?.customFields?.cashTendering;
+  if (!record || typeof record !== 'object') return null;
+
+  const tendered = toFiniteNumber(record.tendered);
+  if (tendered === null) return null;
+
+  const amountDue = toFiniteNumber(record.amountDue);
+  const storedChange = toFiniteNumber(record.changeDue);
+  const dueAmount = amountDue === null ? tendered : amountDue;
+
+  return {
+    method: record.method ? String(record.method) : 'Cash',
+    methodDetail: record.methodDetail ? String(record.methodDetail) : null,
+    amountDue: roundCurrency(dueAmount),
+    tendered: roundCurrency(tendered),
+    changeDue: storedChange === null
+      ? roundCurrency(Math.max(0, roundCurrency(tendered) - roundCurrency(dueAmount)))
+      : roundCurrency(Math.max(0, storedChange)),
+  };
+}
+
 async function buildThermalReceipt(printer, data, totals) {
   // Get character width from printer config
   const charWidth = printer.config.width;
@@ -378,8 +433,11 @@ async function buildThermalReceipt(printer, data, totals) {
     charWidth
   ));
 
+  // Present only on sales finalized through the cash tender step.
+  const cashTendering = getSaleCashTendering(data);
+
   // Payments - Manual spacing for full width
-  if (totals.payments.length > 0) {
+  if (totals.payments.length > 0 || cashTendering) {
 
     printer.drawLine();
 
@@ -402,7 +460,10 @@ async function buildThermalReceipt(printer, data, totals) {
 
     });
 
-    printer.drawLine();
+    // Only separate the payment list from the totals when there is a list.
+    if (totals.payments.length > 0) {
+      printer.drawLine();
+    }
 
     if (totals.totalPaid > 0) {
       printer.println(createTwoColumnLine(
@@ -416,6 +477,20 @@ async function buildThermalReceipt(printer, data, totals) {
       printer.println(createTwoColumnLine(
         "DUE",
         `${CommaFormatted(CurrencyFormatted(totals.balanceDue))}`,
+        charWidth
+      ));
+    }
+
+    // Cash received / change back, matching the browser receipt.
+    if (cashTendering) {
+      printer.println(createTwoColumnLine(
+        "CASH RECEIVED",
+        `${CommaFormatted(CurrencyFormatted(cashTendering.tendered))}`,
+        charWidth
+      ));
+      printer.println(createTwoColumnLine(
+        "CHANGE",
+        `${CommaFormatted(CurrencyFormatted(cashTendering.changeDue))}`,
         charWidth
       ));
     }
