@@ -11,7 +11,14 @@ permissions:
 
 jobs:
   release:
-    runs-on: windows-latest
+    # Pinned, not windows-latest. @thesusheer/electron-printer ships no
+    # prebuild-install in its dependency tree, so its install script always
+    # falls through to `node-gyp rebuild` and needs a C++ toolchain. The
+    # windows-latest image moved to Visual Studio 18, which the node-gyp 10.x
+    # bundled with Node 20 cannot detect ("unknown version undefined"), so the
+    # install step fails. windows-2022 carries the VS 2022 toolchain that built
+    # every release up to 1.0.15.
+    runs-on: windows-2022
 
     steps:
       - name: Checkout code
